@@ -16,6 +16,7 @@
 6. SessionStart：新 session 透過 `LIMIT_RELAY_JOB` 環境變數認出自己，注入交接內容。
 
 ## 設定（config.json）
+- 個人設定寫在同目錄的 `config.local.json`，只寫要改的鍵，會蓋過 `config.json`；更新工具時不會被覆蓋，也不會進 repo。
 - `enabled`：總開關。
 - `minContextTokens`：撞限額時上下文低於這個值就不接手（預設 80000）。
 - `safetySteps`、`minRemainPct`、`maxRemainPct`、`burnWindow`、`defaultBurnPct`：觸發寫交接的動態門檻，預設 4、2、25、12、1。
@@ -33,7 +34,7 @@
 - `node handoff.js <逐字稿.jsonl> [專案目錄]`：只印出機械式擷取的交接內容。
 
 ## 停用
-- 暫停：`config.json` 的 `enabled` 改成 `false`。
+- 暫停：`config.local.json` 寫 `{"enabled": false}`。
 - 移除：刪掉 `~/.claude/settings.json` 裡指向 `limit-relay` 的 `statusLine` 和四個 hook（PostToolUse、StopFailure、UserPromptSubmit、SessionStart）。
 
 ## 已知限制

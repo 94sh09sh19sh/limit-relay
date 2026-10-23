@@ -60,7 +60,8 @@ function loadConfig() {
   try {
     env = JSON.parse(process.env.LIMIT_RELAY_CONFIG_JSON || '{}');
   } catch {}
-  return { ...DEFAULT_CONFIG, ...readJson(path.join(ROOT, 'config.json'), {}), ...env };
+  // config.json 是 repo 的預設值；config.local.json 是本機個人設定，部署不會覆蓋
+  return { ...DEFAULT_CONFIG, ...readJson(path.join(ROOT, 'config.json'), {}), ...readJson(path.join(ROOT, 'config.local.json'), {}), ...env };
 }
 
 function log(msg) {
