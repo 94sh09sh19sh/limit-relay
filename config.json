@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "minContextTokens": 80000,
+  "safetySteps": 4,
+  "minRemainPct": 2,
+  "maxRemainPct": 25,
+  "burnWindow": 12,
+  "defaultBurnPct": 1,
+  "launch": true,
+  "launchModes": ["auto"],
+  "launchDelaySec": 150,
+  "terminal": "wt",
+  "debug": false
+}
