@@ -104,12 +104,34 @@ function onResume(input, cfg) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 叫醒時請模型把交接直接寫在回覆裡，從這一行開始存成交接檔
+const HANDOFF_MARK = '# limit-relay 交接';
+
+// 叫醒後的第一次 Stop：從 last_assistant_message 存下交接；不管有沒有存到都清掉標記，之後的回覆不會被誤存
+function saveWakeHandoff(sess, msg) {
+  if (!sess.wakeAskedFor) return false;
+  const i = String(msg || '').indexOf(HANDOFF_MARK);
+  if (i >= 0 && sess.handoffWrittenFor !== sess.wakeAskedFor) {
+    const p = sess.handoffPath || L.handoffPathFor(sess.cwd, sess.sid);
+    L.prepareHandoffDir(sess.cwd);
+    fs.writeFileSync(p, msg.slice(i));
+    sess.handoffPath = p;
+    sess.handoffWrittenAt = Date.now();
+    sess.handoffWrittenFor = sess.wakeAskedFor;
+    L.log(`[${sess.sid.slice(0, 8)}] 已從叫醒那一輪的回覆存下交接檔`);
+  }
+  sess.wakeAskedFor = null;
+  return true;
+}
+
 // Stop 時還有背景工作或排程在跑，代表 session 只是暫停等它們；在背景盯用量，快撞到限額就用 asyncRewake（exit 2）叫醒它先寫交接
 async function onStop(input, cfg) {
-  if (!cfg.watchIdle || input.agent_id) return 0;
+  if (input.agent_id) return 0;
+  const sess = syncSession(input);
+  if (saveWakeHandoff(sess, input.last_assistant_message)) L.saveSession(sess);
+  if (!cfg.watchIdle) return 0;
   const waiting = (input.background_tasks?.length || 0) + (input.session_crons?.length || 0);
   if (!waiting) return 0;
-  const sess = syncSession(input);
   L.saveSession(sess);
   const tag = `[${sess.sid.slice(0, 8)}]`;
   if (L.lastContextTokens(L.tailRecords(sess.transcriptPath)) < cfg.minContextTokens) return 0;
@@ -133,8 +155,10 @@ async function onStop(input, cfg) {
         L.log(`${tag} 快取已過期，不叫醒寫交接`);
         return 0;
       }
-      const text = handoffRequest(cur, cfg, five.used, five.resetsAt, burn, (p) => `這個 session 正在等背景工作或排程，被 limit-relay 叫醒（不是使用者訊息）。現在用 Write 把交接寫到 ${p}（覆寫），寫完就結束這一輪繼續等，不要做其他事，也不要回報。`);
+      // 寫在回覆裡而不用 Write：少一次工具結果回來後的請求（又要讀一整段快取），也不會被寫檔的 hook 擋下重寫
+      const text = handoffRequest(cur, cfg, five.used, five.resetsAt, burn, () => `這個 session 正在等背景工作或排程，被 limit-relay 叫醒（不是使用者訊息）。不要呼叫任何工具，直接把交接寫成這一輪的回覆，第一行寫「${HANDOFF_MARK}」，hook 會自動存成交接檔；回覆完就結束這一輪繼續等，不要做其他事。`);
       if (text) {
+        cur.wakeAskedFor = five.resetsAt;
         L.saveSession(cur);
         process.stderr.write(text);
         return 2;

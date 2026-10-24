@@ -11,7 +11,7 @@
 1. statusline 每次更新時，把 `rate_limits.five_hour` 存到 `state/usage.json`。
 2. PostToolUse：記錄最近幾步的用量變化，估計每步花幾 %。剩餘額度 ≤ 每步用量 × `safetySteps`（夾在 `minRemainPct`～`maxRemainPct` 之間），而且上下文 ≥ `minContextTokens` 時，請模型把交接寫到 `<專案>/.limit-relay/handoff-<sid>.md`，寫完繼續原本的工作，不浪費剩下的額度。
 3. UserPromptSubmit：閒置的 session 收到你的新訊息或背景工作的完成通知時，也做一次同樣的檢查（平行的其他 session 可能已經把額度用掉大半），不等第一個工具呼叫。用量檔沒更新時用同一個視窗內的舊值當下限。
-4. Stop（`asyncRewake`）：這一輪結束時還有背景工作或排程（Claude Code 在 Stop 輸入給的 `background_tasks`、`session_crons`：背景指令、子代理、Monitor、ScheduleWakeup、CronCreate、/loop），代表 session 只是暫停等它們。這時在背景每 30 秒看一次用量檔，其他平行 session 把額度用到門檻時，就用 exit 2 叫醒這個 session，請模型寫好交接後繼續等。逐字稿有新紀錄（工作回來、你打字、cache-guard 保溫）就結束，交給下一次 Stop 重新開始。快取已經過期時不叫醒，避免在額度快用完時整段重寫。
+4. Stop（`asyncRewake`）：這一輪結束時還有背景工作或排程（Claude Code 在 Stop 輸入給的 `background_tasks`、`session_crons`：背景指令、子代理、Monitor、ScheduleWakeup、CronCreate、/loop），代表 session 只是暫停等它們。這時在背景每 30 秒看一次用量檔，其他平行 session 把額度用到門檻時，就用 exit 2 叫醒這個 session，請模型把交接直接寫成這一輪的回覆（不呼叫工具），下一次 Stop 從 `last_assistant_message` 存成交接檔後繼續等。不用 Write 是因為工具結果回來後模型還要再回一次，等於多讀一整段快取，交接檔也可能被寫檔的 hook 擋下重寫。逐字稿有新紀錄（工作回來、你打字、cache-guard 保溫）就結束，交給下一次 Stop 重新開始。快取已經過期時不叫醒，避免在額度快用完時整段重寫。
 5. StopFailure（statusline 當保底）偵測到 `usage_limit_reached`：撞到的是 cache-guard 叫醒閒置 session 保溫的那一輪，就不接手，也擋掉之後的內建續跑（session 本來沒在做事，續跑只會白白重寫快取）；上下文太小就交給內建續跑；否則把模型寫的交接加上之後從逐字稿機械式擷取的進度（不花 token），組成最終交接檔，並排程接手。
 6. UserPromptSubmit：擋下舊 session 的內建自動續跑訊息；權限模式不在 `launchModes` 時也擋，並提示用 `take` 手動接手（自己打字送出照常放行）。
 7. waiter（背景程式）在重置後 `launchDelaySec` 秒檢查：舊 session 若已經自己續跑（沒擋到或你手動接手）就不開新的；資料夾沒被信任過也不開，避免卡在確認框；其餘情況開新的 Windows Terminal 分頁，用原本的權限模式啟動 `claude`。
@@ -49,4 +49,5 @@
 - 做完事、沒有背景工作的閒置 session 不會被叫醒：叫醒要花一次整段上下文的讀取，而它沒有進行中的工作要交接；你下次送出訊息時才檢查。
 - 等背景工作時，快取已過期（例如 5 小時用量 ≥ 90% 後 cache-guard 停止保溫超過 1 小時）就不叫醒，工作回來那一步撞到限額時只有機械式擷取的交接。
 - 一次最多盯 `watchMaxSec`（約 5 小時）；Claude Code 文件沒寫 `asyncRewake` hook 的 `timeout` 上限，若實際上限較短，背景程式會提早被結束。
+- 等背景工作時被叫醒寫的交接會顯示在終端機（它就是那一輪的回覆）。
 - 新 session 看不到舊對話，品質取決於交接檔；需要細節時，它可以用 Grep 查原逐字稿。
