@@ -31,9 +31,7 @@ function main() {
     sess.cwd = sess.cwd || input.workspace?.current_dir || input.cwd;
     // StopFailure 沒觸發時的保底：狀態列看到撞限額訊息就自己處理
     const hit = cfg.enabled && L.findLimitHit(records);
-    if (hit && (!sess.hit || sess.hit.key !== (hit.resetsAt || Math.floor(hit.at / 1000)))) {
-      handleHit(sess, hit, cfg, 'statusline');
-    }
+    if (hit) handleHit(sess, hit, cfg, 'statusline');
     const cur = L.loadSession(sid);
     if (cur.hit?.mode === 'relay') {
       const job = L.loadJob(cur.hit.jobId);

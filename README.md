@@ -10,10 +10,11 @@
 ## 流程
 1. statusline 每次更新時，把 `rate_limits.five_hour` 存到 `state/usage.json`。
 2. PostToolUse：記錄最近幾步的用量變化，估計每步花幾 %。剩餘額度 ≤ 每步用量 × `safetySteps`（夾在 `minRemainPct`～`maxRemainPct` 之間），而且上下文 ≥ `minContextTokens` 時，請模型把交接寫到 `<專案>/.limit-relay/handoff-<sid>.md`，寫完繼續原本的工作，不浪費剩下的額度。
-3. StopFailure（statusline 當保底）偵測到 `usage_limit_reached`：上下文太小就交給內建續跑；否則把模型寫的交接加上之後從逐字稿機械式擷取的進度（不花 token），組成最終交接檔，並排程接手。
-4. UserPromptSubmit：擋下舊 session 的內建自動續跑訊息；權限模式不在 `launchModes` 時也擋，並提示用 `take` 手動接手（自己打字送出照常放行）。
-5. waiter（背景程式）在重置後 `launchDelaySec` 秒檢查：舊 session 若已經自己續跑（沒擋到或你手動接手）就不開新的；資料夾沒被信任過也不開，避免卡在確認框；其餘情況開新的 Windows Terminal 分頁，用原本的權限模式啟動 `claude`。
-6. SessionStart：新 session 透過 `LIMIT_RELAY_JOB` 環境變數認出自己，注入交接內容。
+3. UserPromptSubmit：閒置的 session 收到你的新訊息時也做一次同樣的檢查（平行的其他 session 可能已經把額度用掉大半），不等第一個工具呼叫。用量檔沒更新時用同一個視窗內的舊值當下限。
+4. StopFailure（statusline 當保底）偵測到 `usage_limit_reached`：撞到的是 cache-guard 叫醒閒置 session 保溫的那一輪，就不接手，也擋掉之後的內建續跑（session 本來沒在做事，續跑只會白白重寫快取）；上下文太小就交給內建續跑；否則把模型寫的交接加上之後從逐字稿機械式擷取的進度（不花 token），組成最終交接檔，並排程接手。
+5. UserPromptSubmit：擋下舊 session 的內建自動續跑訊息；權限模式不在 `launchModes` 時也擋，並提示用 `take` 手動接手（自己打字送出照常放行）。
+6. waiter（背景程式）在重置後 `launchDelaySec` 秒檢查：舊 session 若已經自己續跑（沒擋到或你手動接手）就不開新的；資料夾沒被信任過也不開，避免卡在確認框；其餘情況開新的 Windows Terminal 分頁，用原本的權限模式啟動 `claude`。
+7. SessionStart：新 session 透過 `LIMIT_RELAY_JOB` 環境變數認出自己，注入交接內容。
 
 ## 設定（config.json）
 - 個人設定寫在同目錄的 `config.local.json`，只寫要改的鍵，會蓋過 `config.json`；更新工具時不會被覆蓋，也不會進 repo。
@@ -41,4 +42,5 @@
 ## 已知限制
 - 擋下內建續跑靠的是 UserPromptSubmit；真的撞到限額前沒辦法驗證。沒擋到時 waiter 會發現舊 session 已續跑而不開新 session，結果跟沒裝這個工具時一樣，不會兩邊同時做。
 - 用量百分比是整數，每步用量是用最近 12 步平均估出來的。
+- 閒置中的 session 不會主動寫交接：叫醒它寫要花一次整段上下文的讀取。它下次收到訊息或工具結果時才檢查；等背景工作回來的那一步就撞到限額時，只有機械式擷取的交接。
 - 新 session 看不到舊對話，品質取決於交接檔；需要細節時，它可以用 Grep 查原逐字稿。

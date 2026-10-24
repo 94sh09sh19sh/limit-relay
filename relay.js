@@ -15,11 +15,19 @@ function spawnWaiter(jobId) {
   return child.pid;
 }
 
-// 同一個 session 同一次重置只處理一次；StopFailure 和 statusline 都可能呼叫
+// 同一個 session 同一次重置只處理一次；StopFailure 和 statusline 都可能呼叫，重複的由這裡擋掉
 function handleHit(sess, hit, cfg, source) {
   if (!sess.transcriptPath || !sess.cwd) return null;
   const key = hit.resetsAt || Math.floor(hit.at / 1000);
-  if (sess.hit && sess.hit.key === key) return null;
+  // 閒置保溫撞到的限額不算數：之後使用者回來又撞到（同一個重置時間）要照常處理
+  if (sess.hit && sess.hit.key === key && (sess.hit.mode !== 'idle' || sess.hit.at === hit.at)) return null;
+
+  if (hit.idle) {
+    sess.hit = { key, resetsAt: hit.resetsAt, at: hit.at, mode: 'idle', source };
+    L.saveSession(sess);
+    L.log(`[${sess.sid.slice(0, 8)}] cache-guard 保溫那一輪撞到限額，session 原本閒置，不接手也不續跑（來源 ${source}）`);
+    return null;
+  }
 
   const records = L.tailRecords(sess.transcriptPath);
   const ctx = L.lastContextTokens(records);

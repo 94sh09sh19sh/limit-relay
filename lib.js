@@ -127,6 +127,14 @@ function loadUsage(maxAgeMs = 15 * 60 * 1000) {
   return u;
 }
 
+// 5 小時用量的下限：用量檔只在有 session 活動時更新，但同一個視窗內用量只增不減，舊值仍是有效下限；視窗已重置就從 0 算
+function usageFloor() {
+  const f = readJson(USAGE_FILE)?.five_hour;
+  if (!f || typeof f.used !== 'number') return null;
+  if (f.resetsAt && Date.now() >= f.resetsAt * 1000) return { ...f, used: 0 };
+  return f;
+}
+
 // 讀逐字稿最後一段，由新到舊回傳解析後的紀錄
 function tailRecords(file, bytes = 512 * 1024) {
   let fd;
@@ -165,13 +173,28 @@ function lastContextTokens(records) {
   return r ? contextTokens(r.message.usage) : 0;
 }
 
-// 找最近一筆「撞到限額」的合成訊息
+// cache-guard 喚醒閒置 session 時送進來的訊息
+const KEEP_WARM_RE = /cache-guard (自動保溫|喚醒測試)（不是使用者訊息）/;
+
+function textOf(content) {
+  if (typeof content === 'string') return content;
+  return Array.isArray(content) ? content.filter((b) => b.type === 'text').map((b) => b.text).join('\n') : '';
+}
+
+// 觸發這一輪的是不是 cache-guard 保溫：往前找第一筆不是工具結果的使用者紀錄
+function isKeepWarmTurn(older) {
+  const u = older.find((r) => r.type === 'user' && !r.isSidechain && !(Array.isArray(r.message?.content) && r.message.content.some((b) => b.type === 'tool_result')));
+  return Boolean(u && KEEP_WARM_RE.test(textOf(u.message?.content)));
+}
+
+// 找最近一筆「撞到限額」的合成訊息；idle 代表撞到的是閒置保溫那一輪，沒有進行中的工作
 function findLimitHit(records) {
-  for (const r of records) {
+  for (let i = 0; i < records.length; i++) {
+    const r = records[i];
     if (isRealAssistant(r)) return null;
     if (r.type === 'assistant' && r.apiError === 'usage_limit_reached') {
       const info = r.apiErrorParams?.rate_limit_info || r.quotaLimits || {};
-      return { resetsAt: info.resetsAt || null, at: Date.parse(r.timestamp) || Date.now(), type: info.rateLimitType || 'unknown' };
+      return { resetsAt: info.resetsAt || null, at: Date.parse(r.timestamp) || Date.now(), type: info.rateLimitType || 'unknown', idle: isKeepWarmTurn(records.slice(i + 1)) };
     }
   }
   return null;
@@ -217,6 +240,6 @@ module.exports = {
   ROOT, STATE, DIRS, USAGE_FILE, LOG_FILE, AUTO_CONTINUE_PREFIXES, DEFAULT_CONFIG,
   ensureDirs, readJson, writeJson, loadConfig, log, readStdin,
   sessionFile, jobFile, loadSession, saveSession, loadJob, saveJob, listJobs,
-  parseFiveHour, loadUsage, tailRecords, isRealAssistant, contextTokens, lastContextTokens, findLimitHit,
+  parseFiveHour, loadUsage, usageFloor, tailRecords, isRealAssistant, contextTokens, lastContextTokens, KEEP_WARM_RE, findLimitHit,
   hhmm, kTok, handoffPathFor, prepareHandoffDir, pidAlive, os,
 };

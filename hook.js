@@ -18,7 +18,7 @@ function syncSession(input) {
 // 依最近幾步的用量增加量估計「每一步」花多少 %，再決定要不要請模型先寫交接
 function onPostToolUse(input, cfg) {
   const sess = syncSession(input);
-  const handoffPath = sess.handoffPath || L.handoffPathFor(sess.cwd || input.cwd, sess.sid);
+  const handoffPath = sess.handoffPath || L.handoffPathFor(sess.cwd, sess.sid);
   const target = input.tool_input?.file_path;
   if (target && /^(Write|Edit|MultiEdit)$/.test(input.tool_name) && path.resolve(target) === path.resolve(handoffPath)) {
     sess.handoffWrittenAt = Date.now();
@@ -38,41 +38,41 @@ function onPostToolUse(input, cfg) {
   }
   sess.samples.push({ t: Date.now(), used, resetsAt });
   sess.samples = sess.samples.slice(-cfg.burnWindow);
-  if (sess.triggeredFor === resetsAt) return L.saveSession(sess);
 
   const s = sess.samples;
   const burn = s.length >= 3 ? Math.max(0, (s[s.length - 1].used - s[0].used) / (s.length - 1)) : cfg.defaultBurnPct;
+  sess.lastBurn = burn;
+  const text = handoffRequest(sess, cfg, used, resetsAt, burn, '下一步請先');
+  L.saveSession(sess);
+  if (text) out({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: text } });
+}
+
+// 剩餘額度 ≤ 每步用量 × safetySteps，而且上下文夠大，就回傳請模型寫交接的文字（每次重置只請一次）
+function handoffRequest(sess, cfg, used, resetsAt, burn, when) {
+  if (sess.triggeredFor === resetsAt) return null;
   const remain = 100 - used;
   const threshold = Math.min(cfg.maxRemainPct, Math.max(cfg.minRemainPct, cfg.safetySteps * burn));
-  sess.lastBurn = burn;
-  if (remain > threshold) return L.saveSession(sess);
-
+  if (remain > threshold) return null;
   const ctx = L.lastContextTokens(L.tailRecords(sess.transcriptPath));
-  if (ctx < cfg.minContextTokens) return L.saveSession(sess);
+  if (ctx < cfg.minContextTokens) return null;
 
   sess.triggeredFor = resetsAt;
-  sess.handoffPath = handoffPath;
+  sess.handoffPath = sess.handoffPath || L.handoffPathFor(sess.cwd, sess.sid);
   L.prepareHandoffDir(sess.cwd);
-  L.saveSession(sess);
   const steps = burn > 0 ? Math.max(1, Math.floor(remain / burn)) : '?';
   L.log(`[${sess.sid.slice(0, 8)}] 用量 ${used}%、每步約 ${burn.toFixed(2)}%、上下文 ${L.kTok(ctx)}，請模型寫交接`);
-  out({
-    hookSpecificOutput: {
-      hookEventName: 'PostToolUse',
-      additionalContext: [
-        `[limit-relay] 5 小時額度已用 ${Math.round(used)}%，${L.hhmm(resetsAt)} 重置；照目前速度約再 ${steps} 步就會撞到限額。`,
-        `下一步請先用 Write 把交接寫到 ${handoffPath}（覆寫），寫完繼續原本的工作，不要停下來，也不要在回覆裡提這件事。`,
-        `撞到限額後，會有一個全新的 session 只讀這份交接接手（不會讀這段對話，目前上下文 ${L.kTok(ctx)}），所以要寫到不看對話也能接著做：`,
-        '1. 目標：使用者的原始要求與限制條件（盡量照原文）',
-        '2. 已完成：做完並驗證過的事',
-        '3. 進行中：做到哪裡，標出檔案:行號',
-        '4. 下一步：具體到可以直接執行的指令或修改',
-        '5. 決策與原因、踩過的坑、不要再試的做法',
-        '6. 怎麼驗證：測試指令、預期結果',
-        '用條列短句，全部控制在 1500 字以內；程式碼已經在檔案裡的不要重貼。',
-      ].join('\n'),
-    },
-  });
+  return [
+    `[limit-relay] 5 小時額度已用 ${Math.round(used)}%，${L.hhmm(resetsAt)} 重置；照目前速度約再 ${steps} 步就會撞到限額。`,
+    `${when}用 Write 把交接寫到 ${sess.handoffPath}（覆寫），寫完繼續原本的工作，不要停下來，也不要在回覆裡提這件事。`,
+    `撞到限額後，會有一個全新的 session 只讀這份交接接手（不會讀這段對話，目前上下文 ${L.kTok(ctx)}），所以要寫到不看對話也能接著做：`,
+    '1. 目標：使用者的原始要求與限制條件（盡量照原文）',
+    '2. 已完成：做完並驗證過的事',
+    '3. 進行中：做到哪裡，標出檔案:行號',
+    '4. 下一步：具體到可以直接執行的指令或修改',
+    '5. 決策與原因、踩過的坑、不要再試的做法',
+    '6. 怎麼驗證：測試指令、預期結果',
+    '用條列短句，全部控制在 1500 字以內；程式碼已經在檔案裡的不要重貼。',
+  ].join('\n');
 }
 
 function onStopFailure(input, cfg) {
@@ -86,12 +86,28 @@ function onStopFailure(input, cfg) {
   handleHit(sess, hit, cfg, `StopFailure:${input.error || '?'}`);
 }
 
+// 使用者送出訊息：閒置期間其他平行 session 可能已經把額度用掉大半，這一步就先檢查，不等第一個工具呼叫
+function onResume(input, cfg) {
+  const five = L.usageFloor();
+  if (!five || L.KEEP_WARM_RE.test(String(input.prompt || ''))) return;
+  const sess = syncSession(input);
+  const last = sess.samples[sess.samples.length - 1];
+  const burn = last && last.resetsAt === five.resetsAt && typeof sess.lastBurn === 'number' ? sess.lastBurn : cfg.defaultBurnPct;
+  const text = handoffRequest(sess, cfg, five.used, five.resetsAt, burn, '處理這則訊息前，先');
+  L.saveSession(sess);
+  if (text) out({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } });
+}
+
 // 已經排好新 session 接手時，擋掉舊 session 的內建自動續跑，避免重寫整段快取；
 // 權限模式不自動接手（manual）時也擋，改由使用者用 take 開新 session；launch 關掉時才放行
 function onUserPromptSubmit(input, cfg) {
   const prompt = String(input.prompt || '');
-  if (!L.AUTO_CONTINUE_PREFIXES.some((p) => prompt.startsWith(p))) return;
+  if (!L.AUTO_CONTINUE_PREFIXES.some((p) => prompt.startsWith(p))) return onResume(input, cfg);
   const sess = L.loadSession(input.session_id);
+  if (sess.hit?.mode === 'idle') {
+    L.log(`[${sess.sid.slice(0, 8)}] 已擋下內建自動續跑（撞限額的是閒置保溫那一輪）`);
+    return out({ decision: 'block', reason: 'limit-relay：撞到限額的是 cache-guard 閒置保溫那一輪，這個 session 沒有進行中的工作，不續跑，省下重寫整段快取。要繼續就直接打字送出。' });
+  }
   const job = sess.hit?.jobId && L.loadJob(sess.hit.jobId);
   const manual = job?.status === 'manual' && cfg.launch;
   if (!job || !(manual || ['waiting', 'launched', 'resumed'].includes(job.status))) {
