@@ -10,5 +10,9 @@
   "launchModes": ["auto"],
   "launchDelaySec": 150,
   "terminal": "wt",
+  "watchIdle": true,
+  "watchPollSec": 30,
+  "watchMaxSec": 17940,
+  "watchWakeCold": false,
   "debug": false
 }

@@ -32,6 +32,15 @@ const DEFAULT_CONFIG = {
   launchModes: ['auto'],
   launchDelaySec: 150,
   terminal: 'wt',
+  // Stop 時還有背景工作或排程，就在背景盯用量，快撞到限額時叫醒 session 寫交接
+  watchIdle: true,
+  watchPollSec: 30,
+  // 要比 deploy.json 裡 Stop hook 的 timeout 短，自己先結束，不被 Claude Code 砍掉
+  watchMaxSec: 17940,
+  // Stop 後等多久才記下逐字稿大小當基準（Claude Code 收尾還會寫幾筆紀錄）
+  watchBaselineSec: 20,
+  // 快取已過期時要不要照樣叫醒（要整段重寫）
+  watchWakeCold: false,
 };
 
 function ensureDirs() {
@@ -80,6 +89,16 @@ function readStdin() {
 }
 
 const sessionFile = (sid) => path.join(DIRS.sessions, `${sid}.json`);
+// 背景盯用量的擁有者另外存，避免和 session 檔同時寫入時互相蓋掉
+const watchFile = (sid) => path.join(DIRS.sessions, `${sid}.watch.json`);
+
+const fileSize = (file) => {
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return -1;
+  }
+};
 const jobFile = (id) => path.join(DIRS.jobs, `${id}.json`);
 
 function loadSession(sid) {
@@ -167,6 +186,15 @@ function contextTokens(u) {
   return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
 
+// 最後一次主對話請求的快取還沒過期（1 小時或 5 分鐘，看最後一次寫入的是哪種），留 2 分鐘餘裕
+function cacheWarm(records) {
+  const r = records.find(isRealAssistant);
+  if (!r) return false;
+  const cc = r.message.usage.cache_creation || {};
+  const ttl = cc.ephemeral_5m_input_tokens > 0 && !(cc.ephemeral_1h_input_tokens > 0) ? 5 * 60e3 : 60 * 60e3;
+  return Date.now() - Date.parse(r.timestamp) < ttl - 2 * 60e3;
+}
+
 // 最近一次真正送到 API 的請求有多大，就是續跑時要重寫的快取量
 function lastContextTokens(records) {
   const r = records.find(isRealAssistant);
@@ -239,7 +267,7 @@ function pidAlive(pid) {
 module.exports = {
   ROOT, STATE, DIRS, USAGE_FILE, LOG_FILE, AUTO_CONTINUE_PREFIXES, DEFAULT_CONFIG,
   ensureDirs, readJson, writeJson, loadConfig, log, readStdin,
-  sessionFile, jobFile, loadSession, saveSession, loadJob, saveJob, listJobs,
-  parseFiveHour, loadUsage, usageFloor, tailRecords, isRealAssistant, contextTokens, lastContextTokens, KEEP_WARM_RE, findLimitHit,
+  sessionFile, watchFile, fileSize, jobFile, loadSession, saveSession, loadJob, saveJob, listJobs,
+  parseFiveHour, loadUsage, usageFloor, tailRecords, isRealAssistant, contextTokens, lastContextTokens, cacheWarm, KEEP_WARM_RE, findLimitHit,
   hhmm, kTok, handoffPathFor, prepareHandoffDir, pidAlive, os,
 };

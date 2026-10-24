@@ -4,7 +4,8 @@
     { "event": "PostToolUse", "script": "hook.js", "timeout": 10 },
     { "event": "StopFailure", "script": "hook.js", "timeout": 30 },
     { "event": "UserPromptSubmit", "script": "hook.js", "timeout": 10 },
-    { "event": "SessionStart", "script": "hook.js", "timeout": 10 }
+    { "event": "SessionStart", "script": "hook.js", "timeout": 10 },
+    { "event": "Stop", "script": "hook.js", "timeout": 18000, "asyncRewake": true }
   ],
   "statusLine": "statusline.js"
 }

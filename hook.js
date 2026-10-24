@@ -1,4 +1,4 @@
-// limit-relay 的 hook 入口：PostToolUse、StopFailure、UserPromptSubmit、SessionStart
+// limit-relay 的 hook 入口：PostToolUse、StopFailure、UserPromptSubmit、SessionStart、Stop（asyncRewake，背景盯用量）
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -42,17 +42,23 @@ function onPostToolUse(input, cfg) {
   const s = sess.samples;
   const burn = s.length >= 3 ? Math.max(0, (s[s.length - 1].used - s[0].used) / (s.length - 1)) : cfg.defaultBurnPct;
   sess.lastBurn = burn;
-  const text = handoffRequest(sess, cfg, used, resetsAt, burn, '下一步請先');
+  const text = handoffRequest(sess, cfg, used, resetsAt, burn, (p) => `下一步請先用 Write 把交接寫到 ${p}（覆寫），寫完繼續原本的工作，不要停下來，也不要在回覆裡提這件事。`);
   L.saveSession(sess);
   if (text) out({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: text } });
 }
 
-// 剩餘額度 ≤ 每步用量 × safetySteps，而且上下文夠大，就回傳請模型寫交接的文字（每次重置只請一次）
-function handoffRequest(sess, cfg, used, resetsAt, burn, when) {
-  if (sess.triggeredFor === resetsAt) return null;
+// 沒有新的工具呼叫時沿用這個視窗最後估到的每步用量
+function lastBurnFor(sess, five, cfg) {
+  const last = sess.samples[sess.samples.length - 1];
+  return last && last.resetsAt === five.resetsAt && typeof sess.lastBurn === 'number' ? sess.lastBurn : cfg.defaultBurnPct;
+}
+
+const nearLimit = (cfg, used, burn) => 100 - used <= Math.min(cfg.maxRemainPct, Math.max(cfg.minRemainPct, cfg.safetySteps * burn));
+
+// 剩餘額度 ≤ 每步用量 × safetySteps，而且上下文夠大，就回傳請模型寫交接的文字（每次重置只請一次）；how(交接檔路徑) 是怎麼寫、寫完做什麼
+function handoffRequest(sess, cfg, used, resetsAt, burn, how) {
+  if (sess.triggeredFor === resetsAt || !nearLimit(cfg, used, burn)) return null;
   const remain = 100 - used;
-  const threshold = Math.min(cfg.maxRemainPct, Math.max(cfg.minRemainPct, cfg.safetySteps * burn));
-  if (remain > threshold) return null;
   const ctx = L.lastContextTokens(L.tailRecords(sess.transcriptPath));
   if (ctx < cfg.minContextTokens) return null;
 
@@ -63,7 +69,7 @@ function handoffRequest(sess, cfg, used, resetsAt, burn, when) {
   L.log(`[${sess.sid.slice(0, 8)}] 用量 ${used}%、每步約 ${burn.toFixed(2)}%、上下文 ${L.kTok(ctx)}，請模型寫交接`);
   return [
     `[limit-relay] 5 小時額度已用 ${Math.round(used)}%，${L.hhmm(resetsAt)} 重置；照目前速度約再 ${steps} 步就會撞到限額。`,
-    `${when}用 Write 把交接寫到 ${sess.handoffPath}（覆寫），寫完繼續原本的工作，不要停下來，也不要在回覆裡提這件事。`,
+    how(sess.handoffPath),
     `撞到限額後，會有一個全新的 session 只讀這份交接接手（不會讀這段對話，目前上下文 ${L.kTok(ctx)}），所以要寫到不看對話也能接著做：`,
     '1. 目標：使用者的原始要求與限制條件（盡量照原文）',
     '2. 已完成：做完並驗證過的事',
@@ -91,11 +97,53 @@ function onResume(input, cfg) {
   const five = L.usageFloor();
   if (!five || L.KEEP_WARM_RE.test(String(input.prompt || ''))) return;
   const sess = syncSession(input);
-  const last = sess.samples[sess.samples.length - 1];
-  const burn = last && last.resetsAt === five.resetsAt && typeof sess.lastBurn === 'number' ? sess.lastBurn : cfg.defaultBurnPct;
-  const text = handoffRequest(sess, cfg, five.used, five.resetsAt, burn, '處理這則訊息前，先');
+  const text = handoffRequest(sess, cfg, five.used, five.resetsAt, lastBurnFor(sess, five, cfg), (p) => `處理這則訊息前，先用 Write 把交接寫到 ${p}（覆寫），寫完接著處理這則訊息，不要在回覆裡提這件事。`);
   L.saveSession(sess);
   if (text) out({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Stop 時還有背景工作或排程在跑，代表 session 只是暫停等它們；在背景盯用量，快撞到限額就用 asyncRewake（exit 2）叫醒它先寫交接
+async function onStop(input, cfg) {
+  if (!cfg.watchIdle || input.agent_id) return 0;
+  const waiting = (input.background_tasks?.length || 0) + (input.session_crons?.length || 0);
+  if (!waiting) return 0;
+  const sess = syncSession(input);
+  L.saveSession(sess);
+  const tag = `[${sess.sid.slice(0, 8)}]`;
+  if (L.lastContextTokens(L.tailRecords(sess.transcriptPath)) < cfg.minContextTokens) return 0;
+
+  // 同一個 session 只留最新的一個在盯；逐字稿有新紀錄代表 session 又動起來了，交給 PostToolUse 或下一次 Stop
+  const owner = `${process.pid}-${Date.now()}`;
+  const wf = L.watchFile(sess.sid);
+  L.writeJson(wf, { owner, waiting, startedAt: Date.now() });
+  L.log(`${tag} 停下來等 ${waiting} 個背景工作或排程，背景盯用量`);
+  const end = Date.now() + cfg.watchMaxSec * 1000;
+  await sleep(cfg.watchBaselineSec * 1000);
+  const base = L.fileSize(sess.transcriptPath);
+  while (Date.now() < end) {
+    if (L.readJson(wf, {}).owner !== owner || L.fileSize(sess.transcriptPath) !== base) return 0;
+    const five = L.usageFloor();
+    const cur = L.loadSession(sess.sid);
+    const burn = five && lastBurnFor(cur, five, cfg);
+    if (five && cur.triggeredFor !== five.resetsAt && nearLimit(cfg, five.used, burn)) {
+      // 快取冷了叫醒要整段重寫，在額度快用完時反而會把剩下的額度吃掉
+      if (!cfg.watchWakeCold && !L.cacheWarm(L.tailRecords(cur.transcriptPath))) {
+        L.log(`${tag} 快取已過期，不叫醒寫交接`);
+        return 0;
+      }
+      const text = handoffRequest(cur, cfg, five.used, five.resetsAt, burn, (p) => `這個 session 正在等背景工作或排程，被 limit-relay 叫醒（不是使用者訊息）。現在用 Write 把交接寫到 ${p}（覆寫），寫完就結束這一輪繼續等，不要做其他事，也不要回報。`);
+      if (text) {
+        L.saveSession(cur);
+        process.stderr.write(text);
+        return 2;
+      }
+    }
+    await sleep(cfg.watchPollSec * 1000);
+  }
+  L.log(`${tag} 盯用量到達時間上限（${Math.round(cfg.watchMaxSec / 60)} 分），結束`);
+  return 0;
 }
 
 // 已經排好新 session 接手時，擋掉舊 session 的內建自動續跑，避免重寫整段快取；
@@ -162,11 +210,19 @@ function main() {
       return onUserPromptSubmit(input, cfg);
     case 'SessionStart':
       return onSessionStart(input);
+    case 'Stop':
+      return onStop(input, cfg);
   }
 }
 
-try {
-  main();
-} catch (e) {
-  L.log(`hook 錯誤：${e.stack || e}`);
-}
+// 出錯一律安靜結束（exit 0），絕不因為錯誤叫醒 session
+Promise.resolve()
+  .then(main)
+  .then((code) => {
+    // 用 exitCode 讓程式自然結束，stdout 的輸出才不會被截斷
+    process.exitCode = code === 2 ? 2 : 0;
+  })
+  .catch((e) => {
+    L.log(`hook 錯誤：${e.stack || e}`);
+    process.exitCode = 0;
+  });
