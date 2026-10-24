@@ -86,22 +86,26 @@ function onStopFailure(input, cfg) {
   handleHit(sess, hit, cfg, `StopFailure:${input.error || '?'}`);
 }
 
-// 已經排好新 session 接手時，擋掉舊 session 的內建自動續跑，避免重寫整段快取
-function onUserPromptSubmit(input) {
+// 已經排好新 session 接手時，擋掉舊 session 的內建自動續跑，避免重寫整段快取；
+// 權限模式不自動接手（manual）時也擋，改由使用者用 take 開新 session；launch 關掉時才放行
+function onUserPromptSubmit(input, cfg) {
   const prompt = String(input.prompt || '');
   if (!L.AUTO_CONTINUE_PREFIXES.some((p) => prompt.startsWith(p))) return;
   const sess = L.loadSession(input.session_id);
   const job = sess.hit?.jobId && L.loadJob(sess.hit.jobId);
-  if (!job || !['waiting', 'launched', 'resumed'].includes(job.status)) {
+  const manual = job?.status === 'manual' && cfg.launch;
+  if (!job || !(manual || ['waiting', 'launched', 'resumed'].includes(job.status))) {
     L.log(`[${String(input.session_id).slice(0, 8)}] 內建自動續跑放行（沒有接手工作）`);
     return;
   }
   job.blockedAt = Date.now();
   L.saveJob(job);
-  L.log(`[${job.id}] 已擋下舊 session 的內建自動續跑`);
+  L.log(`[${job.id}] 已擋下舊 session 的內建自動續跑${manual ? '（手動接手）' : ''}`);
   out({
     decision: 'block',
-    reason: `limit-relay：改由新 session 讀交接檔接手（${job.handoffPath}），這個 session 不續跑，省下重寫 ${L.kTok(job.ctx)} 快取的成本。`,
+    reason: manual
+      ? `limit-relay：這個 session 不自動續跑，省下重寫 ${L.kTok(job.ctx)} 快取的成本。要接手就在終端機執行 node ~/.claude/limit-relay/cli.js take ${job.id}（開新 session 讀交接檔 ${job.handoffPath}）；要留在這裡繼續就直接打字送出。`
+      : `limit-relay：改由新 session 讀交接檔接手（${job.handoffPath}），這個 session 不續跑，省下重寫 ${L.kTok(job.ctx)} 快取的成本。`,
   });
 }
 
@@ -139,7 +143,7 @@ function main() {
     case 'StopFailure':
       return onStopFailure(input, cfg);
     case 'UserPromptSubmit':
-      return onUserPromptSubmit(input);
+      return onUserPromptSubmit(input, cfg);
     case 'SessionStart':
       return onSessionStart(input);
   }

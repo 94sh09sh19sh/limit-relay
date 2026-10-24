@@ -1,4 +1,4 @@
-// limit-relay 管理指令：status、log、cancel、report、handoff
+// limit-relay 管理指令：status、log、cancel、take、report、handoff
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -29,6 +29,20 @@ function cancel() {
     n++;
   }
   console.log(`已取消 ${n} 個等待中的工作`);
+}
+
+// 手動接手：權限模式不自動啟動的工作，在目前的終端機開新 session 並注入交接
+function take() {
+  const job = L.loadJob(arg);
+  if (!job) return console.log(`找不到工作 ${arg}；用 status 看工作 id`);
+  if (!['manual', 'cancelled'].includes(job.status)) return console.log(`工作 ${job.id} 的狀態是 ${job.status}，不能再接手`);
+  job.status = 'launched';
+  job.launchedAt = Date.now();
+  job.via = 'take';
+  L.saveJob(job);
+  L.log(`[${job.id}] 使用者手動接手`);
+  const r = require('child_process').spawnSync(process.execPath, [path.join(L.ROOT, 'launch.js'), job.id], { stdio: 'inherit' });
+  process.exitCode = r.status ?? 0;
 }
 
 // 統計每次限額重置後第一個請求重寫了多少快取，用來比較使用前後的差異
@@ -77,9 +91,12 @@ switch (cmd) {
   case 'report':
     report();
     break;
+  case 'take':
+    take();
+    break;
   case 'handoff':
     process.stdout.write(require('./handoff').extract(arg, process.cwd()));
     break;
   default:
-    console.log('用法：node cli.js [status|log [行數]|cancel <工作 id|all>|report|handoff <逐字稿.jsonl>]');
+    console.log('用法：node cli.js [status|log [行數]|cancel <工作 id|all>|take <工作 id>|report|handoff <逐字稿.jsonl>]');
 }

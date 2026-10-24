@@ -11,7 +11,7 @@
 1. statusline 每次更新時，把 `rate_limits.five_hour` 存到 `state/usage.json`。
 2. PostToolUse：記錄最近幾步的用量變化，估計每步花幾 %。剩餘額度 ≤ 每步用量 × `safetySteps`（夾在 `minRemainPct`～`maxRemainPct` 之間），而且上下文 ≥ `minContextTokens` 時，請模型把交接寫到 `<專案>/.limit-relay/handoff-<sid>.md`，寫完繼續原本的工作，不浪費剩下的額度。
 3. StopFailure（statusline 當保底）偵測到 `usage_limit_reached`：上下文太小就交給內建續跑；否則把模型寫的交接加上之後從逐字稿機械式擷取的進度（不花 token），組成最終交接檔，並排程接手。
-4. UserPromptSubmit：擋下舊 session 的內建自動續跑訊息。
+4. UserPromptSubmit：擋下舊 session 的內建自動續跑訊息；權限模式不在 `launchModes` 時也擋，並提示用 `take` 手動接手（自己打字送出照常放行）。
 5. waiter（背景程式）在重置後 `launchDelaySec` 秒檢查：舊 session 若已經自己續跑（沒擋到或你手動接手）就不開新的；資料夾沒被信任過也不開，避免卡在確認框；其餘情況開新的 Windows Terminal 分頁，用原本的權限模式啟動 `claude`。
 6. SessionStart：新 session 透過 `LIMIT_RELAY_JOB` 環境變數認出自己，注入交接內容。
 
@@ -21,7 +21,7 @@
 - `minContextTokens`：撞限額時上下文低於這個值就不接手（預設 80000）。
 - `safetySteps`、`minRemainPct`、`maxRemainPct`、`burnWindow`、`defaultBurnPct`：觸發寫交接的動態門檻，預設 4、2、25、12、1。
 - `launch`：要不要自動開新 session；`false` 時只產生交接檔，也不擋內建續跑。
-- `launchModes`：只有這些權限模式的 session 會自動接手（預設只有 `auto`）。
+- `launchModes`：只有這些權限模式的 session 會自動接手（預設只有 `auto`）；其他模式只產生交接檔、擋內建續跑，等你用 `take` 接手。
 - `launchDelaySec`：重置後等幾秒才啟動（預設 150，內建續跑會在重置後 30–90 秒觸發）。
 - `terminal`：`wt` 或 `cmd`。
 - `debug`：把每個 hook 的輸入存到 `state/debug/`。
@@ -30,6 +30,7 @@
 - `node cli.js status`：目前用量與接手工作。
 - `node cli.js log [行數]`：事件紀錄（`state/relay.log`）。
 - `node cli.js cancel <工作 id|all>`：取消等待中的接手。
+- `node cli.js take <工作 id>`：在目前的終端機開新 session 讀交接檔接手（給不自動接手或已取消的工作）。
 - `node cli.js report`：統計每次重置後第一個請求的快取寫入量，比較續跑和接手。
 - `node handoff.js <逐字稿.jsonl> [專案目錄]`：只印出機械式擷取的交接內容。
 
